@@ -1,0 +1,9 @@
+.git
+.github
+.venv
+**/__pycache__
+**/*.pyc
+cleaning_output
+cleaning/output
+Data/From Kaggle
+Python Scripts
