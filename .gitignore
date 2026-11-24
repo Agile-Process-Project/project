@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+cleaning_output/
+docker_output/
+cleaning/output/
