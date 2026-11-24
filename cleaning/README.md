@@ -1,94 +1,95 @@
-# HomeMatch cleaning review
+# HomeMatch cleaning and clustering preparation
 
-This package is a revised cleaning pass over the **10,020-row, 54-column `listings_cleaned.csv`** supplied in the repository ZIP. It does not overwrite Andrew's script, the SQLite database or the existing database import format. Review it with the database/search owners before integrating it.
+This script processes the repository's `Data/Cleaned Data/listings_cleaned.csv` snapshot. It implements the team's clarified missing-value rules, semantic-type imputation, Z-score outlier removal and correlation-based redundancy filtering. It preserves a separate search/display dataset because statistical estimates must not replace verified accommodation facts.
 
-## Run it
+## Run from the repository root
 
-Use Python 3.11 or later. From this folder:
-
-```bash
-python -m venv .venv
-```
-
-On Windows PowerShell, activation is optional; use the environment's Python directly:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe clean_listings.py --input "C:\path\to\project-main\Data\Cleaned Data\listings_cleaned.csv" --output output
-```
-
-On Linux/macOS:
+Install `cleaning/requirements.txt` in a Python 3.11+ environment. Then:
 
 ```bash
-.venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python clean_listings.py --input /path/to/listings_cleaned.csv --output output
+python -m unittest discover -s tests -v
+python cleaning/clean_listings.py --input "Data/Cleaned Data/listings_cleaned.csv" --output cleaning_output
 ```
 
-The input CSV is already in the repository ZIP and is not duplicated in this package. `--missing-threshold 0.5` is the default: drop columns with **strictly more than 50%** missing, retaining a column at exactly 50%.
+Options:
 
-## Results from this run
+| Option | Default | Meaning |
+|---|---|---|
+| `--missing-threshold` | `0.5` | Drop columns strictly above this missing fraction |
+| `--numeric-imputation` | `median` | `median` or `mean`, for numerical model fields |
+| `--zscore-threshold` | `3.0` | Remove model rows if any selected numerical field has absolute Z-score strictly above this |
+| `--correlation-threshold` | `0.9` | Drop redundant numerical features when absolute Pearson correlation is strictly above this |
+
+## Processing decisions
+
+1. **Duplicates:** remove exact source-record repeats, including ID in the comparison. Stop if different records share an ID. Never merge distinct IDs because they have similar accommodation features.
+2. **Missing columns:** trim whitespace-only text to missing, profile missingness after deduplication and remove columns with more than 50% missing values. A column exactly half empty is retained. This threshold operates on the supplied snapshot before parsing/domain checks; any later invalid numeric values are logged and handled as missing.
+3. **Conversions:** parse currency-formatted numbers, percentages, counts and booleans. Flag invalid domain values and leave them unknown in the search/display table. Do not overwrite legitimate bedroom counts or booking restrictions. Currency symbols are stripped, not converted: the input uses `$`, and the actual currency remains unverified.
+4. **Imputation before encoding:** select the model fields listed below, then fill missing numerical measurements with the median by default. Median is chosen for accommodation measurements that can be skewed, and the team allows mean or median. The mean option is also implemented and tested. Fill missing categorical values with their mode, even if their source labels happen to be numeric. Tied modes use the first sorted mode for reproducibility. Add missingness indicators and log every fill value/count. All-missing model fields after parsing are excluded and logged, rather than assigned an invented value.
+5. **Z-score outliers:** calculate `z = (x - mean) / population_standard_deviation` on the ten imputed numerical candidates. Perform **one pass**, dropping a row from modelling when **any absolute Z-score > 3**. Constant columns have Z-score zero. Do not apply this rule to IDs, category codes, missing flags, one-hot indicators or TF-IDF terms. Export all Z-scores and the IDs/reasons of removed rows. The 3 threshold comes from the team's supplied requirements. Statistical extremes can be valid listings; the complete source-fact table is retained separately.
+6. **Numerical feature selection:** compute a Pearson correlation matrix **after outlier removal and before scaling**. Remove constant numerical fields. Use a configurable absolute-correlation threshold of **0.90** to remove redundant fields. This threshold is an implementation choice, not a threshold specified in Thomas's notes. Process fields in the priority order below and retain a candidate only if it is not too strongly correlated with any already retained field. Every keep/drop decision is exported. This reduces redundancy; it does not prove feature importance or model accuracy.
+7. **Encoding:** standardize the retained numerical fields; one-hot encode categorical fields; encode descriptions with TF-IDF (at most 500 terms). Missing descriptions become empty documents, because free text is not a categorical field to fill with another listing's description. Drop constant encoded columns. Save a sparse numeric matrix with matching row IDs and feature names. Correlation pruning is applied to numerical measurements, not used to impose an ordinal interpretation on categories or perform supervised text selection.
+
+## Model fields and rationale
+
+The numerical priority order is **price, accommodates, bedrooms, bathrooms, beds, latitude, longitude, minimum_nights, maximum_nights, availability_365**. When a redundant pair must be resolved, the earlier field is retained. Affordability and capacity are the primary requirements; accommodation characteristics, location and booking restrictions follow. This deterministic policy should be reviewed if the matching objective changes.
+
+| Fields | Project reason |
+|---|---|
+| price | Affordability; confirm currency before using budget thresholds |
+| accommodates, bedrooms, bathrooms, beds | Capacity and accommodation characteristics |
+| latitude, longitude | Location signals; evaluate coordinate weighting before clustering |
+| minimum_nights, maximum_nights | Booking restrictions; search must also enforce these explicitly |
+| availability_365 | Historical aggregate signal; not confirmation for a requested stay |
+| property_type, room_type, neighbourhood, city | Categorical accommodation/location characteristics |
+| description | Exploratory text similarity; mentions are not verified services or accessibility |
+
+Identifiers, URLs, host names and unrelated source metadata are not included as model distance features. The source-fact output retains remaining display metadata without imputing unverified facts. The null-filling rule is applied to selected model inputs; it is not a reason to invent listing titles, URLs, dates or source identifiers.
+
+## Verified results on the supplied snapshot
 
 | Stage | Rows | Columns |
 |---|---:|---:|
-| Supplied snapshot | 10,020 | 54 |
-| After exact duplicate removal | 10,020 | 54 |
-| Reviewed listing data | 10,020 | 50 |
-| Exploratory numeric clustering matrix | 10,020 | 939 |
+| Input snapshot | 10,020 | 54 |
+| Search/display dataset | 10,020 | 50 |
+| Imputed model fields before outlier removal (no ID/text/indicators) | 10,020 | 14 |
+| Model fields after Z-score removal (no ID/text/indicators) | 9,255 | 14 |
+| Selected interpretable model table (includes ID) | 9,255 | 15 |
+| Final numeric clustering matrix | 9,255 | 898 |
 
-No full-record duplicates or conflicting listing IDs were found. Different IDs are not merged merely because listings share features. Conflicting records with the same ID stop a future run for manual review.
+No exact duplicates were found. The missing-column rule removed `notes`, `zipcode`, `weekly_price` and `monthly_price`. Four zero prices were marked unknown in the source-fact table. The model copy filled four prices, six bedroom counts, seven bathroom counts and 17 bed counts with their medians, and filled 1,482 neighbourhoods and 50 cities with their modes. Imputed neighbourhood/locality values are estimates, not verified property locations.
 
-| Column removed | Missing |
-|---|---:|
-| notes | 60.56% |
-| zipcode | 53.50% |
-| weekly_price | 90.42% |
-| monthly_price | 93.37% |
+The Z-score pass removed **765 unique model rows**. Correlation screening retained all ten numerical candidates: the largest absolute pair correlation was approximately **0.835**, below 0.90. No numerical feature was removed solely to force the feature count lower. Category vocabularies change after outlier filtering, and constant encoded columns are also removed; the final matrix has 898 features. These dimensions are run-specific and may change with a different dataset or options.
 
-Four zero nightly prices were set to missing rather than replaced with invented prices. All listings remain in the output: a priced-search consumer must exclude listings without a valid price. Bedroom counts, minimum stays, maximum stays and annual availability counts are preserved from the supplied snapshot, including six unknown bedroom counts. A zero-bedroom studio is not automatically an error.
+## Output files
 
-The outlier review contains **11,996 field-level IQR flags**, not 11,996 erroneous listings. A listing can have several flags. Values outside an IQR fence are retained for review: expensive properties and long minimum stays can be legitimate. See `outlier_profile.csv` for counts by field and `data_quality_issues.csv` for affected IDs.
-
-## Cleaning decisions and lecturer feedback
-
-* **Duplicates:** compare all original fields including ID before transformations or imputation. Remove only exact repeats. Stop on conflicting versions of an ID.
-* **Missingness:** trim whitespace, measure missing cells and export a per-column profile. Apply the adjustable 50% threshold. Unknown facts remain missing in the listing dataset. Median imputation is restricted to the separate modelling copy and is logged; missing indicators distinguish estimates from observations. Missing categories use an explicit `__UNKNOWN__` category rather than pretending the most common location/property type is correct.
-* **Prices:** remove formatting symbols and separators and parse numbers. **This does not convert currencies.** The supplied strings use `$`; confirm the source currency before displaying euros, applying euro budgets or estimating monthly costs. Missing fees must not be treated as free.
-* **Outliers:** flag with the 1.5-IQR rule. Mark impossible domain values as missing, but do not automatically cap genuine booking restrictions or replace unusual values with averages.
-* **Text:** preserve names, descriptions, listing URLs and other retained text for traceability/display. For modelling, encode room type, property type, neighbourhood and city with one-hot encoding. Encode description text with TF-IDF, capped at 500 terms. Description mentions are not verified accessibility or essential-service facts.
-* **Column selection:** retain source details in the reviewed listing table; select a separate model feature set based on HomeMatch's requirements, as below. This is an exploratory baseline, not evidence that these are the statistically best features. There is no labelled outcome here for supervised feature selection. PCA/chi-square are not implemented or claimed completed. If a specific assessed analysis is mandatory, agree it with the lecturer and document the target first.
-
-| Model inputs | Reason |
+| File | Use |
 |---|---|
-| price | Affordability signal; source currency still needs confirmation |
-| accommodates, bedrooms, bathrooms, beds | Capacity and accommodation characteristics |
-| latitude, longitude | Location signal; coordinate scaling/weighting requires evaluation |
-| minimum_nights, maximum_nights | Booking restrictions; also require explicit eligibility checks in search |
-| availability_365 | Historical aggregate availability signal, not requested-date confirmation |
-| property_type, room_type, neighbourhood, city | Categorical accommodation/location differences |
-| description TF-IDF | Exploratory text similarity; no verified service or amenity claims |
+| `listings_cleaned_reviewed.csv` | 50-column source-fact/search table; unknown values stay missing |
+| `model_ready_listings.csv` | Imputed, outlier-filtered, selected model measurements/categories plus ID; not a database import |
+| `clustering_features.npz` | Sparse encoded model matrix, load with `scipy.sparse.load_npz` |
+| `clustering_row_ids.csv` | IDs in exactly the matrix's row order |
+| `clustering_feature_names.csv` | Names in exactly the matrix's column order |
+| `missing_values_profile.csv` | Missing counts/fractions and threshold decisions |
+| `model_imputation_log.csv` | Semantic types, methods, fill values and counts |
+| `z_scores.csv` | Pre-filter model Z-scores for every source ID |
+| `outlier_profile.csv` | Z-score mean/std and flag counts per numerical field |
+| `outliers_removed.csv` | Excluded model IDs, numerical values, maximum absolute Z-score and triggering fields |
+| `correlation_matrix.csv` | Pearson correlations on post-outlier numerical measurements |
+| `feature_selection.csv` | Keep/drop decisions for numerical measurements |
+| `encoded_feature_selection.csv` | Constant-column removal decisions after encoding |
+| `exact_duplicates_removed.csv` | Exact source duplicates removed, if any |
+| `data_quality_issues.csv` | Invalid domain/parsing values and inconsistent constraints |
+| `stage_counts.csv`, `cleaning_audit.json` | Before/after counts, configuration, source checksum and limitations |
 
-IDs, URLs and host names are excluded from the model matrix. They remain in retained source metadata where present; they are not meaningful distance features. Host popularity/profile characteristics are also excluded from this baseline because the project searches for accommodation suitable for the person, rather than predicting host behaviour.
+## Tests and integration
 
-Numeric model features are standardized after median imputation. Categorical indicators and TF-IDF remain sparse. Block weighting, category consistency and clustering quality still need evaluation before using the matrix in a recommender. If introducing train/test evaluation, fit preprocessing on the training partition only; the included matrix is fitted to this complete snapshot for exploration.
+Eleven automated tests cover duplicates/conflicting IDs, the exact 50% boundary, categorical mode before encoding (including numeric labels), numerical mean/median, mode ties, positive/negative Z-score extremes, constant columns, strict threshold comparisons, correlation redundancy including negative correlations, retained-feature priority and matrix/ID alignment. A full-data run also verified source facts were preserved, excluded/retained IDs form a complete partition, the model table has no nulls, and all sparse values are finite.
 
-## Which file to use
+The existing Dockerfile and GitHub Actions workflow run this script and discover the expanded tests without configuration changes. Rebuild Docker after copying the updates. Generated outputs stay ignored by Git and are uploaded as workflow artifacts.
 
-* `output/listings_cleaned_reviewed.csv`: listing facts and retained display metadata. Unknown factual values remain blank. This has **50 columns** and is not a direct replacement for the existing 12-column `properties_prepared.csv` import.
-* `output/clustering_features.npz`: sparse numeric model input. Load with `scipy.sparse.load_npz`. This is not a trained clustering model.
-* `output/clustering_row_ids.csv`: listing IDs in exactly the matrix row order.
-* `output/clustering_feature_names.csv`: feature names in exactly the matrix column order.
-* Remaining CSV/JSON files: cleaning evidence, thresholds, imputation values, outliers and source checksum for the report.
+This does not deploy an application, train a clustering algorithm, establish matching quality or replace the existing 12-column database import. Confirm source currency and field mappings before integration. Date-specific availability still requires calendar rows; accessibility and service proximity must not be invented from text. The input already contains only 54 columns, so earlier exclusions from the full Kaggle data cannot be justified by this pass. The complete snapshot is used to fit exploratory preprocessing; fit on training data only if adding train/test evaluation later.
 
-The 54-column input was already processed before this work. This review cannot justify earlier exclusions from the full Kaggle source. The original data remains in the repository archive. Date-specific availability must be checked against calendar rows for the complete requested stay; the annual count is insufficient. Accessibility remains outside the agreed implemented scope. Essential-service proximity requires reliable service coordinates/distances, not keyword detection.
+## Report paragraph
 
-## Verification performed
-
-The full-data run checked source ID order and row preservation; unchanged bedroom, minimum/maximum stay and availability values; conversion of four zero prices to missing; and feature-matrix row alignment. A temporary fixture verified `$1,250.50` parsing, preserving an unknown bedroom value, exact duplicate removal, retaining a below-threshold column, dropping an above-threshold column and refusing conflicting IDs. All checks passed. These checks establish preprocessing behaviour, not property suitability or model quality.
-
-## Suggested report paragraph
-
-We reviewed the supplied 10,020-row, 54-column accommodation dataset. No exact duplicate records were found. Four columns exceeded the 50% missing-value threshold and were removed, leaving 50 columns and 10,020 rows. Currency-formatted fields were converted to numeric values, while four zero nightly prices were marked as unknown. Booking restrictions and bedroom counts were preserved. Potential numerical outliers were flagged for review rather than automatically changed. We retained listing details for search and created a separate 939-feature exploratory clustering matrix using scaled numerical fields, one-hot categories and TF-IDF descriptions. Any model-only imputations were recorded separately. The source currency, date-specific availability and model suitability require further verification.
-
-## GitHub handoff
-
-Create a branch such as `data/cleaning-review`, add this script, requirements and cleaning evidence, and open a pull request for review. Confirm the team's policy before committing generated datasets; they may prefer regenerating outputs locally. Do not overwrite the current database import until field mapping, unknown-value handling and currency are agreed. Keep any later GitHub Actions/Docker work in a separate change.
+We revised the cleaning pipeline to follow the team's clarified rules. Starting with 10,020 rows and 54 columns, we found no exact duplicates and removed four columns with more than 50% missing values. In a separate modelling copy, numerical nulls were filled with medians and categorical nulls with modes before encoding. A single absolute Z-score threshold of 3 removed 765 model rows, leaving 9,255. Pearson correlation screening used a redundancy threshold of 0.90; all ten numerical candidates were retained because the highest absolute pair correlation was approximately 0.835. After scaling, one-hot encoding, TF-IDF and constant-feature removal, the exploratory matrix contained 898 features. IDs, exclusions, fill values, selection decisions and counts were exported for traceability. The complete source-fact table remains separate, and eleven automated tests passed.
